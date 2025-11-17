@@ -1,37 +1,120 @@
-name: CI Pipeline
+name: CI Advanced
 
+# Запускаем при пуше и при пул-реквестах в main
 on:
-    push:
-        branches:
-            - main
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-    build-and-test:
-        runs-on: ubuntu-latest
+  # ========================================
+  # 1. Линтинг (ESLint)
+  # ========================================
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install ESLint
+        run: npm install eslint eslint-config-standard eslint-plugin-import eslint-plugin-node eslint-plugin-promise --save-dev
+      - name: Run ESLint
+        run: npx eslint . --ext .js --format stylish
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+  # ========================================
+  # 2. Тесты (Jest)
+  # ========================================
+  test:
+    runs-on: ubuntu-latest
+    needs: lint                     # тест запустится только после успешного линтинга
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests with coverage
+        run: npm test -- --coverage
 
-            - name: Set up Node.js
-              uses: actions/setup-node@v4
-              with:
-                  node-version: "20"
+      # Сохраняем отчёт по покрытию как артефакт
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
 
-            - name: Install dependencies
-              run: npm install
+  # ========================================
+  # 3. Проверка безопасности зависимостей
+  # ========================================
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
 
-            - name: Run tests
-              run: npm test
+      # npm audit в JSON-формате + сохраняем как артефакт
+      - name: Run npm audit
+        run: npm audit --audit-level=high --json > npm-audit-report.json || true
 
-    deploy:
-        runs-on: ubuntu-latest
-        needs: build-and-test
-        if: success()
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-npm-audit
+          path: npm-audit-report.json
+          retention-days: 14
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+      # Дополнительно: retire.js (очень простой и понятный отчёт)
+      - name: Run retire.js
+        run: |
+          npm install -g retire
+          retire --outputformat json --outputpath retire-report.json || true
+      - name: Upload retire.js report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-retire-js
+          path: retire-report.json
 
-            - name: Deploy to production
-              run: echo "Deploying to production server..."
+  # ========================================
+  # 4. Деплой (имитация, только на main после всех проверок)
+  # ========================================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, security]          # запускается только после успешных тестов и security
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - run: echo "Деплой в продакшен завершён! Версия ${{ github.sha }}"
+
+  # ========================================
+  # 5. Уведомления в Slack при падении пайплайна
+  # ========================================
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [lint, test, security, deploy]
+    if: failure() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": ":fire: *CI/CD упал!*\nПроект: *${{ github.repository }}*\nВетка: ${{ github.ref_name }}\nКоммит: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\nАвтор: ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
